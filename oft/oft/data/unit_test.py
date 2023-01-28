@@ -71,7 +71,7 @@ if __name__ == '__main__':
     
     calib = read_kitti_calib(calib)
 
-    # Draw 2d and 3d bounding boxes
+    # Draw 3d bounding boxes
     draw_3d_boxes(image, objects, calib)
     
     
