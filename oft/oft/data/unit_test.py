@@ -6,6 +6,70 @@ from data.kitti import read_kitti_objects
 import torch
 from .. import utils
 
+def draw_2d_boxes(img, objects):
+    """Draw 2d bounding boxes on 2d image.
+
+    Args:
+        img: 2d input image
+        objects: label objects
+    """
+    #0:fully visible 1:partly occluded 2:largely occluded 3:unknown
+    occ_to_color = [(0, 255, 0), (0, 255, 255), (0, 0, 255), (255, 255, 255)]
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    for object in objects:
+        if object.classname in ['Pedestrian', 'Car', 'Cyclist']: 
+            name = object.classname
+            color = occ_to_color[int(object.occlusion)]
+            bbox = object.box2d
+            center = np.array([(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2], dtype=np.float32)
+            center_int = center.astype(np.int32)
+            img = cv2.circle(img, (center_int[0], center_int[1]), 5, color, -1)  # draw the center box
+            img = cv2.rectangle(img, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), color, 2) #draw 2D box
+            img = cv2.putText(img, name, (int(bbox[0]), int(bbox[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+    cv2.imwrite("2d_boxes.jpg", img)
+
+def draw_projected_box3d(image, corners3d, color, thickness=1):
+    ''' Draw 3d bounding box in image
+    input:
+        image: RGB image
+        corners3d: (8,3) array of vertices (in image plane) for the 3d box in following order:
+            1 -------- 0
+           /|         /|
+          2 -------- 3 .
+          | |        | |
+          . 5 -------- 4
+          |/         |/
+          6 -------- 7
+    '''
+
+    corners3d = corners3d.astype(np.int32)
+    for k in range(0, 4):
+        i, j = k, (k + 1) % 4
+        cv2.line(image, (corners3d[i, 0], corners3d[i, 1]), (corners3d[j, 0], corners3d[j, 1]), color, thickness, lineType=cv2.LINE_AA)
+        i, j = k + 4, (k + 1) % 4 + 4
+        cv2.line(image, (corners3d[i, 0], corners3d[i, 1]), (corners3d[j, 0], corners3d[j, 1]), color, thickness, lineType=cv2.LINE_AA)
+        i, j = k, k + 4
+        cv2.line(image, (corners3d[i, 0], corners3d[i, 1]), (corners3d[j, 0], corners3d[j, 1]), color, thickness, lineType=cv2.LINE_AA)
+
+
+def draw_3d_boxes(img, objects, calib):
+    occ_to_color = [(0, 255, 0), (0, 255, 255), (0, 0, 255), (255, 255, 255)]
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    for object in objects:
+        if object.classname in ['Pedestrian', 'Car', 'Cyclist']: 
+            
+            name = object.classname
+            color = occ_to_color[int(object.occlusion)]
+            
+            corners_3d = corners3d(object, calib)
+            draw_projected_box3d(img, corners_3d, color)
+            img = cv2.putText(img, name, (int(corners_3d[5, 0]), int(corners_3d[5, 1] - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            center = np.array([(corners_3d[0, 0] + corners_3d[1, 0] + corners_3d[2, 0] + corners_3d[3, 0] + corners_3d[4, 0] + corners_3d[5, 0] + corners_3d[6, 0] + corners_3d[7, 0]) / 8
+            , (corners_3d[0, 1] + corners_3d[1, 1] + corners_3d[2, 1] + corners_3d[3, 1] + corners_3d[4, 1] + corners_3d[5, 1] + corners_3d[6, 1] + corners_3d[7, 1]) / 8], dtype=np.float32)
+            center_int = center.astype(np.int32)
+            img = cv2.circle(img, (center_int[0], center_int[1]), 5, color, -1)  # draw the center box
+    cv2.imwrite("3d_boxes.jpg", img)
+
 
 if __name__ == '__main__':
     
@@ -19,12 +83,12 @@ if __name__ == '__main__':
     # Load annotations
     label_file = os.path.join(kitti_root, 'label_2/{:06d}.txt'.format(idx))
     
-    objects = read_kitti_objects(label_file)
+    objects = utils.read_kitti_objects(label_file)
 
     # Load calibration matrix
     calib = os.path.join(kitti_root, 'calib/{:06d}.txt'.format(idx))
     
-    calib = read_kitti_calib(calib)
+    calib = utils.read_kitti_calib(calib)
 
     # Draw 2d and 3d bounding boxes
     draw_2d_boxes(image, objects)
