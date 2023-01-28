@@ -138,4 +138,4 @@ class AugmentedObjectDataset(Dataset):
         grid = random_crop_grid(grid, objects, self.grid_size)
         # grid = random_jitter_grid(grid, self.jitter)
 
-        return idx, image, calib, objects, 
+        return idx, image, calib, objects, grid
