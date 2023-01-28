@@ -5,6 +5,7 @@ from PIL import Image
 from data.kitti import read_kitti_objects
 import torch
 from .. import utils
+from .. import kitti
 
 def draw_2d_boxes(img, objects):
     """Draw 2d bounding boxes on 2d image.
@@ -83,12 +84,12 @@ if __name__ == '__main__':
     # Load annotations
     label_file = os.path.join(kitti_root, 'label_2/{:06d}.txt'.format(idx))
     
-    objects = utils.read_kitti_objects(label_file)
+    objects = kitti.read_kitti_objects(label_file)
 
     # Load calibration matrix
     calib = os.path.join(kitti_root, 'calib/{:06d}.txt'.format(idx))
     
-    calib = utils.read_kitti_calib(calib)
+    calib = kitti.read_kitti_calib(calib)
 
     # Draw 2d and 3d bounding boxes
     draw_2d_boxes(image, objects)
