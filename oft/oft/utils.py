@@ -5,7 +5,7 @@ from torchvision.transforms.functional import to_tensor
 from collections import namedtuple, defaultdict, Counter
 
 ObjectData = namedtuple('ObjectData', 
-    ['classname', 'position', 'dimensions', 'angle', 'score'])
+    ['classname','truncated', 'occlusion', 'position', 'dimensions', 'angle', 'score'])
 
 class MetricDict(defaultdict):
 
