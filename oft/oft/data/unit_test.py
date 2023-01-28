@@ -6,7 +6,7 @@ from data.kitti import read_kitti_objects
 import torch
 from .. import utils
 from .kitti import read_kitti_objects, read_kitti_calib
-
+# export PYTHONPATH="${PYTHONPATH}:/home/son/Documents/Project/3d_object_detection"
 
 
 def draw_projected_box3d(image, corners3d, color, thickness=1):
