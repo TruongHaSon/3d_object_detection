@@ -67,7 +67,7 @@ def read_kitti_calib(filename):
     
     raise Exception(
         'Could not find entry for P2 in calib file {}'.format(filename))
-
+    
 def read_kitti_objects(filename):
 
     objects = list()
@@ -80,8 +80,10 @@ def read_kitti_objects(filename):
                 raise IOError('Invalid KITTI object file {}'.format(filename))
 
             # Parse object data
-            objects.append(utils.ObjectData(
+            objects.append(ObjectData(
                 classname=objdata[0],
+                truncated = float(objdata[1]),
+                occlusion = float(objdata[2]),
                 dimensions=[
                     float(objdata[10]), float(objdata[8]), float(objdata[9])],
                 position=[float(p) for p in objdata[11:14]],
