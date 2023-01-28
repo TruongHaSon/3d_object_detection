@@ -4,7 +4,7 @@ import numpy as np
 from PIL import Image
 from data.kitti import read_kitti_objects
 import torch
-
+from .. import utils
 
 
 if __name__ == '__main__':
