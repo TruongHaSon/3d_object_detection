@@ -8,27 +8,32 @@ from .. import utils
 from .kitti import read_kitti_objects, read_kitti_calib
 # export PYTHONPATH="${PYTHONPATH}:/home/son/Documents/Project/3d_object_detection"
 
-
 def draw_projected_box3d(image, corners3d, color, thickness=1):
     ''' Draw 3d bounding box in image
     input:
         image: RGB image
         corners3d: (8,3) array of vertices (in image plane) for the 3d box in following order:
-            1 -------- 0
+            4 -------- 6
            /|         /|
-          2 -------- 3 .
+          5 -------- 7 .
           | |        | |
-          . 5 -------- 4
+          . 0 -------- 2
           |/         |/
-          6 -------- 7
+          1 -------- 3
     '''
 
     corners3d = corners3d.astype(np.int32)
-    for k in range(0, 4):
+    for k in range(0, 4, 2):
         i, j = k, (k + 1) % 4
         cv2.line(image, (corners3d[i, 0], corners3d[i, 1]), (corners3d[j, 0], corners3d[j, 1]), color, thickness, lineType=cv2.LINE_AA)
         i, j = k + 4, (k + 1) % 4 + 4
+        cv2.line(image, (corners3d[i, 0], corners3d[i, 1]), (corners3d[j, 0], corners3d[j, 1]), color, thickness, lineType=cv2.LINE_AA)      
+    for k in range(0, 2, 1):
+        i, j = k, (k + 2) % 4
         cv2.line(image, (corners3d[i, 0], corners3d[i, 1]), (corners3d[j, 0], corners3d[j, 1]), color, thickness, lineType=cv2.LINE_AA)
+        i, j = k + 4, (k + 2) % 4 + 4
+        cv2.line(image, (corners3d[i, 0], corners3d[i, 1]), (corners3d[j, 0], corners3d[j, 1]), color, thickness, lineType=cv2.LINE_AA)        
+    for k in range(0, 4):
         i, j = k, k + 4
         cv2.line(image, (corners3d[i, 0], corners3d[i, 1]), (corners3d[j, 0], corners3d[j, 1]), color, thickness, lineType=cv2.LINE_AA)
 
