@@ -77,7 +77,13 @@ def perspective(matrix, vector):
 
 def make_grid(grid_size, grid_offset, grid_res):
     """
-    Constructs an array representing the corners of an orthographic grid 
+    Args:
+        grid_size: size of grid.
+        grid_offset (int): grid offset.
+        grid_res (float): resolution of grid.
+    Returns:
+        grid: a grid where y is fixed, only has x_coords
+            and z_coords. and the shape is (160, 160, 3)
     """
     depth, width = grid_size
     xoff, yoff, zoff = grid_offset
