@@ -5,8 +5,11 @@ from PIL import Image
 import numpy as np
 from torch.utils.data import Dataset
 from torchvision.transforms.functional import to_tensor
-
+from collections import namedtuple, defaultdict, Counter
 from .. import utils
+
+ObjectData = namedtuple('ObjectData', 
+    ['classname','truncated', 'occlusion', 'position', 'dimensions', 'angle', 'score'])
 
 KITTI_CLASS_NAMES = ['Car', 'Van', 'Truck', 'Pedestrian', 'Person_sitting',
                      'Cyclist', 'Tram', 'Misc', 'DontCare']
@@ -51,12 +54,23 @@ class KittiObjectDataset(Dataset):
 def read_split(filename):
     """
     Read a list of indices to a subset of the KITTI training or testing sets
+    Args:
+        filename (str): name of file.
+    Returns:
+        list of indices to a subset of the KITTI training or testing sets
     """
     with open(filename) as f:
         return [int(val) for val in f]
 
 def read_kitti_calib(filename):
-    """Read the camera 2 calibration matrix from a text file"""
+    """
+    Read the camera 2 calibration matrix from a text file
+    
+    Args:
+        filename (str): name of file.
+    Returns:
+        calib (torch.tensor): Calib file with the shape of (3, 4).    
+    """
 
     with open(filename) as f:
         for line in f:
@@ -69,7 +83,12 @@ def read_kitti_calib(filename):
         'Could not find entry for P2 in calib file {}'.format(filename))
     
 def read_kitti_objects(filename):
-
+    """
+    Args:
+        filename (str): name of file.
+    Returns:
+        list of objects with each of object has ['classname','truncated', 'occlusion', 'position', 'dimensions', 'angle', 'score']
+    """
     objects = list()
     with open(filename, 'r') as fp:
         
