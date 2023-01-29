@@ -48,6 +48,7 @@ def draw_3d_boxes(img, objects, calib):
     Returns:
         Image with 3D bounding box
     '''
+    
     occ_to_color = [(0, 255, 0), (0, 255, 255), (0, 0, 255), (255, 255, 255)]
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     for object in objects:
