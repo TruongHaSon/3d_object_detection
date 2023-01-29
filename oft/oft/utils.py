@@ -140,6 +140,22 @@ def bbox_corners(obj):
     corners = corners + torch.tensor(obj.position)
     return corners
 
+def corners3d(obj, calib, color='b'):
+'''
+    Args: 
+        obj: object in image
+        calib (torch.tensor): Intrinsic matrix with the shape of (3, 4).
+        color: color
+    Return:
+        Corners of 3D bounding box in image coordinates
+'''
+    # Get corners of 3D bounding box
+    corners = bbox_corners(obj)
+
+    # Project into image coordinates
+    img_corners = perspective(calib.cpu(), corners).numpy()
+
+    return img_corners
 
 
 def collate(batch):
