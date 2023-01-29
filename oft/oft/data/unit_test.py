@@ -47,7 +47,7 @@ def draw_3d_boxes(img, objects, calib):
             name = object.classname
             color = occ_to_color[int(object.occlusion)]
             
-            corners_3d = corners3d(object, calib)
+            corners_3d = utils.corners3d(object, calib)
             draw_projected_box3d(img, corners_3d, color)
             img = cv2.putText(img, name, (int(corners_3d[5, 0]), int(corners_3d[5, 1] - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             center = np.array([(corners_3d[0, 0] + corners_3d[1, 0] + corners_3d[2, 0] + corners_3d[3, 0] + corners_3d[4, 0] + corners_3d[5, 0] + corners_3d[6, 0] + corners_3d[7, 0]) / 8
