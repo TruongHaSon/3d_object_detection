@@ -68,6 +68,12 @@ def rotate(vector, angle):
 def perspective(matrix, vector):
     """
     Applies perspective projection to a vector using projection matrix
+    Args:
+        matrix: intrinsic matrix
+        objects: label objects
+    Return:
+    Vector in image coordinates [x, y]
+    
     """
     vector = vector.unsqueeze(-1)
     homogenous = torch.matmul(matrix[..., :-1], vector) + matrix[..., [-1]]
@@ -107,7 +113,10 @@ def gaussian_kernel(sigma=1., trunc=2.):
 
 def bbox_corners(obj):
     """
-    Return the 2D
+    Args:
+        object in image
+    Return:
+        the corners of 3D bounding box with shape (8,3)
     """
 
     # Get corners of bounding box in object space
