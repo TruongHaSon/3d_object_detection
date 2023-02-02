@@ -4,4 +4,4 @@ This is a PyTorch implementation of the OFTNet network from the paper Orthograph
 
 ![image](https://user-images.githubusercontent.com/85555398/216355298-89990653-f61f-45e2-bb8f-60c0c3fbb377.png)
 Data augmentation Since our method relies on a fixed mapping from the image plane to the ground plane, we
-found that extensive data augmentation was essential for the network to learn robustly. We adopt three types of widelyused augmentations: random cropping, scaling and horizontal flipping, adjusting the camera calibration parameters f and (cu, cv) accordingly to reflect these perturbations
+found that extensive data augmentation was essential for the network to learn robustly. We adopt three types of widely-used augmentations: random cropping, scaling and horizontal flipping, adjusting the camera calibration parameters f and (cu, cv) accordingly to reflect these perturbations
