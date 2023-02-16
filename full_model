@@ -1,0 +1,1523 @@
+import time
+import torch
+import numpy as np
+from torchvision.transforms.functional import to_tensor
+from collections import namedtuple, defaultdict, Counter
+import pandas
+from PIL import Image
+from torch.utils.data import Dataset
+from torchvision.transforms.functional import to_tensor
+import random
+from PIL import ImageOps
+from torch.utils.data import Dataset
+import torch.nn as nn
+import torch.utils.model_zoo as model_zoo
+import torch.nn.functional as F
+import os
+import time
+import yaml
+import math
+import numpy as np
+import matplotlib
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
+from datetime import datetime, timedelta
+from argparse import ArgumentParser
+from collections import defaultdict
+import torch.nn as nn
+from torch import optim
+from torch.utils.data import DataLoader
+from tensorboardX import SummaryWriter
+from argparse import ArgumentParser
+import math
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle, Circle, Polygon
+from matplotlib.lines import Line2D
+from matplotlib import cm
+from matplotlib import transforms
+
+
+
+ObjectData = namedtuple('ObjectData', 
+    ['classname', 'position', 'dimensions', 'angle', 'score'])
+
+class MetricDict(defaultdict):
+
+    def __init__(self):
+        super().__init__(float)
+        self.count = defaultdict(int)
+    
+    def __add__(self, other):
+        for key, value in other.items():
+            self[key] += value
+            self.count[key] += 1
+        return self
+    
+    @property
+    def mean(self):
+        return { key: self[key] / self.count[key] for key in self.keys()}
+
+
+class Timer(object):
+
+    def __init__(self):
+        self.total = 0
+        self.runs = 0
+        self.t = 0
+    
+    def reset(self):
+        self.total = 0
+        self.runs = 0
+        self.t = 0
+    
+    def start(self):
+        torch.cuda.synchronize()
+        torch.cuda.synchronize()
+        self.t = time.perf_counter()
+    
+    def stop(self):
+        torch.cuda.synchronize()
+        torch.cuda.synchronize()
+        self.total += time.perf_counter() - self.t
+        self.runs += 1
+    
+    @property
+    def mean(self):
+        val = self.total / self.runs 
+        self.reset()
+        return val
+
+
+def rotate(vector, angle):
+    """
+    Rotate a vector around the y-axis
+    Args:
+      vector that have shape (8, 3)
+      angle: observation angle of object, ranging [-pi..pi]
+    Return:
+      vector after rotate around the y-axis. shape: (8, 3)
+    """
+    sinA, cosA = torch.sin(angle), torch.cos(angle)
+    xvals =  cosA * vector[..., 0] + sinA * vector[..., 2]
+    yvals = vector[..., 1]
+    zvals = -sinA * vector[..., 0] + cosA * vector[..., 2]
+    return torch.stack([xvals, yvals, zvals], dim=-1)
+
+
+def perspective(matrix, vector):
+    """
+    Applies perspective projection to a vector using projection matrix
+    Args:
+        matrix: intrinsic matrix with torch.Size([3, 4])
+        vector: vector in camera coordinate [x, y, z]
+    Return:
+    Vector in image coordinates [x, y]
+    """
+    vector = vector.unsqueeze(-1)
+    homogenous = torch.matmul(matrix[..., :-1], vector) + matrix[..., [-1]]
+    homogenous = homogenous.squeeze(-1)
+    return homogenous[..., :-1] / homogenous[..., [-1]]
+
+
+def make_grid(grid_size, grid_offset, grid_res):
+    """
+    Constructs an array representing the corners of an orthographic grid 
+    Args:
+      grid_size: depth, width of grid. shape: (1, 2)
+      grid_offset: xoff, yoff, zoff of grid to the origin. shape: (1, 3)
+      grid_res: grid resolution. scalar value
+    Return:
+      Grid with consistant distance below the camera 
+    Example:
+      grid_size: (80, 80)
+      grid_offset: (-40, 1.74, 0)
+      grid_res: 0.5
+    --> grid size (160, 160, 3)
+    """
+    depth, width = grid_size
+    xoff, yoff, zoff = grid_offset
+
+    xcoords = torch.arange(0., width, grid_res) + xoff
+    zcoords = torch.arange(0., depth, grid_res) + zoff
+
+    zz, xx = torch.meshgrid(zcoords, xcoords)
+    return torch.stack([xx, torch.full_like(xx, yoff), zz], dim=-1)
+
+
+def gaussian_kernel(sigma=1., trunc=2.):
+
+    width = round(trunc * sigma)
+    x = torch.arange(-width, width+1).float() / sigma
+    kernel1d = torch.exp(-0.5 * x ** 2)
+    kernel2d = kernel1d.view(1, -1) * kernel1d.view(-1, 1)
+
+    return kernel2d / kernel2d.sum()
+
+
+def bbox_corners(obj):
+    """
+    Args:
+      obj: object in image
+    Return:
+      corners of bounding box from obj with shape (8, 3) in camera coordinate
+    """
+    # Get corners of bounding box in object space
+    offsets = torch.tensor([
+        [-.5,  0., -.5],    # Back-left lower
+        [ .5,  0., -.5],    # Front-left lower
+        [-.5,  0.,  .5],    # Back-right lower
+        [ .5,  0.,  .5],    # Front-right lower
+        [-.5, -1., -.5],    # Back-left upper
+        [ .5, -1., -.5],    # Front-left upper
+        [-.5, -1.,  .5],    # Back-right upper
+        [ .5, -1.,  .5],    # Front-right upper
+    ])
+    corners = offsets * torch.tensor(obj.dimensions)
+    # corners = corners[:, [2, 0, 1]]
+
+    # Apply y-axis rotation
+    corners = rotate(corners, torch.tensor(obj.angle))
+
+
+    # Apply translation
+    corners = corners + torch.tensor(obj.position)
+    return corners
+
+
+
+def collate(batch):
+
+    idxs, images, calibs, objects, grids = zip(*batch)
+
+    # Crop images to the same dimensions
+    minw = min(img.size[0] for img in images)
+    minh = min(img.size[1] for img in images)
+    images = [img.crop((0, 0, minw, minh)) for img in images]
+
+    # Create a vector of indices
+    idxs = torch.LongTensor(idxs)
+
+    # Stack images and calibration matrices along the batch dimension
+    images = torch.stack([to_tensor(img) for img in images])
+    calibs = torch.stack(calibs)
+    grids = torch.stack(grids)
+
+    return idxs, images, calibs, objects, grids
+
+
+def convert_figure(fig, tight=True):
+    # Converts a matplotlib figure into a numpy array
+
+    # Draw plot
+    if tight:
+        fig.tight_layout(pad=0)
+    fig.canvas.draw()
+
+    # Convert figure to numpy via a string array
+    data = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep='')
+    return data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+
+KITTI_CLASS_NAMES = ['Car', 'Van', 'Truck', 'Pedestrian', 'Person_sitting',
+                     'Cyclist', 'Tram', 'Misc', 'DontCare']
+
+class KittiObjectDataset(Dataset):
+
+    def __init__(self, kitti_root, split='train', grid_size=(80., 80.), 
+                 grid_res=0.5, y_offset=1.74):
+        
+        # Get the root directory containing object detection data
+        kitti_split = 'testing' if split == 'test' else 'training'
+        self.root = os.path.join(kitti_root, 'object', kitti_split)
+
+        # Read split indices from file
+        split_file = kitti_root + '/ImageSets/{}.txt'.format(split)
+        self.indices = read_split(split_file)
+
+        # Make grid
+        self.grid = make_grid(
+            grid_size, (-grid_size[0]/2., y_offset, 0.), grid_res)
+    
+    def __len__(self):
+        return len(self.indices)
+    
+    def __getitem__(self, index):
+        idx = self.indices[index]
+
+        # Load image
+        img_file = os.path.join(self.root, 'image_2/{:06d}.png'.format(idx))
+        image = Image.open(img_file)
+
+        # Load calibration matrix
+        calib_file = os.path.join(self.root, 'calib/{:06d}.txt'.format(idx))
+        calib = read_kitti_calib(calib_file)
+
+        # Load annotations
+        label_file = os.path.join(self.root, 'label_2/{:06d}.txt'.format(idx))
+        objects = read_kitti_objects(label_file)
+
+        return idx, image, calib, objects, self.grid
+
+def read_split(filename):
+    """
+    Read a list of indices to a subset of the KITTI training or testing sets
+    Args:
+        filename (str): name of file.
+    Returns:
+        list of indices to a subset of the KITTI training or testing sets
+    """
+    with open(filename) as f:
+        return [int(val) for val in f]
+
+def read_kitti_calib(filename):
+    """
+    Read the camera 2 calibration matrix from a text file
+    
+    Args:
+        filename (str): name of file.
+    Returns:
+        calib (torch.tensor): Calib file with the shape of (3, 4).    
+    """
+
+    with open(filename) as f:
+        for line in f:
+            data = line.split(' ')
+            if data[0] == 'P2:':
+                calib = torch.tensor([float(x) for x in data[1:13]])
+                return calib.view(3, 4)
+    
+    raise Exception(
+        'Could not find entry for P2 in calib file {}'.format(filename))
+
+def read_kitti_objects(filename):
+    """
+    Args:
+        filename (str): name of file.
+    Returns:
+        list of objects with each of object has ['classname', 'position', 'dimensions', 'angle', 'score']
+    """
+    objects = list()
+    with open(filename, 'r') as fp:
+        
+        # Each line represents a single object
+        for line in fp:
+            objdata = line.split(' ')
+            if not (14 <= len(objdata) <= 15):
+                raise IOError('Invalid KITTI object file {}'.format(filename))
+
+            # Parse object data
+            objects.append(ObjectData(
+                classname=objdata[0],
+                dimensions=[
+                    float(objdata[10]), float(objdata[8]), float(objdata[9])],
+                position=[float(p) for p in objdata[11:14]],
+                angle=float(objdata[14]),
+                score=float(objdata[15]) if len(objdata) == 16 else 1.
+            ))
+    return objects
+    
+
+def random_crop(image, calib, objects, output_size):
+    
+    # Randomize bounding box coordinates
+    width, height = image.size
+    w_out, h_out = output_size
+    left = random.randint(0, max(width - w_out, 0))
+    upper = random.randint(0, max(height - h_out, 0))
+
+    # Crop image
+    right = left + w_out
+    lower = upper + h_out
+    image = image.crop((left, upper, right, lower))
+
+    # Modify calibration matrix
+    calib[0, 2] = calib[0, 2] - left                # cx' = cx - du
+    calib[1, 2] = calib[1, 2] - upper               # cy' = cy - dv
+    calib[0, 3] = calib[0, 3] - left * calib[2, 3]  # tx' = tx - du * tz
+    calib[1, 3] = calib[1, 3] - upper * calib[2, 3] # ty' = ty - dv * tz
+
+    # Include only visible objects
+    cropped_objects = list()
+    for obj in objects:
+        upos = perspective(calib, calib.new(obj.position))[0]
+        if upos >= 0 and upos < w_out:
+            cropped_objects.append(obj)
+
+    return image, calib, cropped_objects
+
+
+def random_scale(image, calib, scale_range=(0.8, 1.2)):
+    scale = random.uniform(*scale_range)
+
+    # Scale image
+    width, height = image.size
+    image = image.resize((int(width * scale), int(height * scale)))
+
+    # Scale first two rows of calibration matrix
+    calib[:2, :] *= scale
+
+    return image, calib
+
+
+def random_flip(image, calib, objects):
+    if random.random() < 0.5:
+        return image, calib, objects
+    
+    # Flip image
+    image = ImageOps.mirror(image)
+
+    # Modify calibration matrix
+    width, _ = image.size
+    calib[0, 2] = width - calib[0, 2]               # cx' = w - cx
+    calib[0, 3] = width * calib[2, 3] - calib[0, 3] # tx' = w*tz - tx
+
+    # Flip object x-positions
+    flipped_objects = list()
+    for obj in objects:
+        position = [-obj.position[0]] + obj.position[1:]
+        angle = math.atan2(math.sin(obj.angle), -math.cos(obj.angle))
+        flipped_objects.append(ObjectData(
+            obj.classname, position, obj.dimensions, angle, obj.score
+        ))
+
+    return image, calib, flipped_objects
+
+
+def random_crop_grid(grid, objects, crop_size):
+
+    # Get input and output dimensions
+    grid_d, grid_w, _ = grid.size()
+    crop_w, crop_d = crop_size
+
+    # Try and find a crop that includes at least one object
+    for _ in range(10): # Timeout after 10 attempts
+
+        # Randomize offsets
+        xoff = random.randrange(grid_w - crop_w) if crop_w < grid_w else 0
+        zoff = random.randrange(grid_d - crop_d) if crop_d < grid_d else 0
+
+        # Crop grid
+        cropped_grid = grid[zoff:zoff+crop_d, xoff:xoff+crop_w].contiguous()
+
+        # If there are no objects present, any random crop will do
+        if len(objects) == 0:
+            return cropped_grid
+        
+        # Get bounds
+        minx, _, minz = cropped_grid.view(-1, 3).min(dim=0)[0]
+        maxx, _, maxz = cropped_grid.view(-1, 3).max(dim=0)[0]
+
+        # Search objects to see if any lie within the grid
+        for obj in objects:
+            objx, _, objz = obj.position
+
+            # If any object overlaps with the grid, return
+            if minx < objx < maxx and minz < objz < maxz:
+                return cropped_grid
+
+    return cropped_grid
+
+    
+def random_jitter_grid(grid, std):
+    grid += torch.randn(3) * torch.tensor(std)
+    return grid
+
+
+class AugmentedObjectDataset(Dataset):
+
+    def __init__(self, dataset, image_size=(1080, 360), grid_size=(160, 160), 
+                 scale_range=(0.8, 1.2), jitter=[.25, .5, .25]):
+        self.dataset = dataset
+        self.image_size = image_size
+        self.grid_size = grid_size
+        self.scale_range = scale_range
+        self.jitter = jitter
+    
+    def __len__(self):
+        return len(self.dataset)
+    
+    def __getitem__(self, index):
+        idx, image, calib, objects, grid = self.dataset[index]
+
+        # Apply image augmentation
+        image, calib = random_scale(image, calib, self.scale_range)
+        image, calib, objects = random_crop(
+            image, calib, objects, self.image_size)
+        image, calib, objects = random_flip(image, calib, objects)
+
+        # Augment grid
+        grid = random_crop_grid(grid, objects, self.grid_size)
+        # grid = random_jitter_grid(grid, self.jitter)
+
+        return idx, image, calib, objects, grid
+        
+
+model_urls = {
+    'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
+    'resnet34': 'https://download.pytorch.org/models/resnet34-333f7ec4.pth',
+    'resnet50': 'https://download.pytorch.org/models/resnet50-19c8e357.pth',
+    'resnet101': 'https://download.pytorch.org/models/resnet101-5d3b4d8f.pth',
+    'resnet152': 'https://download.pytorch.org/models/resnet152-b121ed2d.pth',
+}
+
+
+def conv3x3(in_planes, out_planes, stride=1):
+    """3x3 convolution with padding"""
+    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
+                     padding=1, bias=False)
+
+
+def conv1x1(in_planes, out_planes, stride=1):
+    """1x1 convolution"""
+    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
+
+
+class BasicBlock(nn.Module):
+    expansion = 1
+
+    def __init__(self, inplanes, planes, stride=1):
+        super(BasicBlock, self).__init__()
+
+        self.conv1 = conv3x3(inplanes, planes, stride)
+        self.bn1 = nn.GroupNorm(16, planes)
+
+        self.conv2 = conv3x3(planes, planes)
+        self.bn2 = nn.GroupNorm(16, planes)
+
+        if stride != 1 or inplanes != planes:
+            self.downsample = nn.Sequential(
+                conv1x1(inplanes, planes, stride), nn.GroupNorm(16, planes))
+        else:
+            self.downsample = None
+
+
+    def forward(self, x):
+        identity = x
+
+        out = F.relu(self.bn1(self.conv1(x)), inplace=True)
+        out = self.bn2(self.conv2(out))
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out += identity
+        out = F.relu(out, inplace=True)
+
+        return out
+
+
+class Bottleneck(nn.Module):
+    expansion = 4
+
+    def __init__(self, inplanes, planes, stride=1):
+        super(Bottleneck, self).__init__()
+        self.conv1 = conv1x1(inplanes, planes)
+        self.bn1 = nn.GroupNorm(16, planes)
+        self.conv2 = conv3x3(planes, planes, stride)
+        self.bn2 = nn.GroupNorm(16, planes)
+        self.conv3 = conv1x1(planes, planes * self.expansion)
+        self.bn3 = nn.GroupNorm(16, planes * self.expansion)
+
+        if stride != 1 or inplanes != planes * self.expansion:
+            self.downsample = nn.Sequential(
+                conv1x1(inplanes, planes * self.expansion, stride), 
+                nn.GroupNorm(16, planes * self.expansion))
+        else:
+            self.downsample = None
+
+    def forward(self, x):
+        identity = x
+
+        out = F.relu(self.bn1(self.conv1(x)), inplace=True)
+        out = F.relu(self.bn2(self.conv2(out)), inplace=True)
+        out = self.bn3(self.conv3(out))
+ 
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out += identity
+        out = F.relu(out)
+
+        return out
+
+
+class ResNetFeatures(nn.Module):
+
+    def __init__(self, block, layers, num_classes=1000, zero_init_residual=False):
+        super(ResNetFeatures, self).__init__()
+        self.inplanes = 64
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,
+                               bias=False)
+        self.bn1 = nn.GroupNorm(16, 64)
+
+        self.layer1 = self._make_layer(block, 64, layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
+
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+        # Zero-initialize the last BN in each residual branch,
+        # so that the residual branch starts with zeros, and each residual block behaves like an identity.
+        # This improves the model by 0.2~0.3% according to https://arxiv.org/abs/1706.02677
+        if zero_init_residual:
+            for m in self.modules():
+                if isinstance(m, Bottleneck):
+                    nn.init.constant_(m.bn3.weight, 0)
+                elif isinstance(m, BasicBlock):
+                    nn.init.constant_(m.bn2.weight, 0)
+
+    def _make_layer(self, block, planes, blocks, stride=1):
+
+        layers = []
+        layers.append(block(self.inplanes, planes, stride))
+        self.inplanes = planes * block.expansion
+        for _ in range(1, blocks):
+            layers.append(block(self.inplanes, planes))
+
+        return nn.Sequential(*layers)
+
+
+    def forward(self, x):
+        #x: torch.Size([1, 3, 360, 1080])   
+        conv1 = F.relu(self.bn1(self.conv1(x)), inplace=True) # torch.Size([1, 64, 180, 540])
+        conv1 = F.max_pool2d(conv1, 3, stride=2, padding=1) # torch.Size([1, 64, 90, 270])
+ 
+        feats4 = self.layer1(conv1)   #torch.Size([1, 64, 90, 270])     
+        feats8 = self.layer2(feats4)  #torch.Size([1, 128, 45, 135]) because of stride 2  
+        feats16 = self.layer3(feats8) #torch.Size([1, 256, 23, 68]) because of stride 2   
+        feats32 = self.layer4(feats16)  #torch.Size([1, 512, 12, 34]) because of stride 2  
+        
+        return feats8, feats16, feats32
+
+
+
+def resnet18(pretrained=False, **kwargs):
+    """Constructs a ResNet-18 model.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+    """
+    model = ResNetFeatures(BasicBlock, [2, 2, 2, 2], **kwargs)
+    if pretrained:
+        _load_pretrained(model, model_zoo.load_url(model_urls['resnet18']))
+    return model
+
+
+
+def resnet34(pretrained=False, **kwargs):
+    """Constructs a ResNet-34 model.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+    """
+    model = ResNetFeatures(BasicBlock, [3, 4, 6, 3], **kwargs)
+    if pretrained:
+        _load_pretrained(model, model_zoo.load_url(model_urls['resnet34']))
+    return model
+
+
+def _load_pretrained(model, pretrained):
+    model_dict = model.state_dict()
+    pretrained = {k : v for k, v in pretrained.items() if k in model_dict}
+    model_dict.update(pretrained)
+    model.load_state_dict(model_dict)
+
+EPSILON = 1e-6
+
+class OFT(nn.Module):
+
+    def __init__(self, channels, cell_size, grid_height, scale=1):
+        super().__init__()
+
+        y_corners = torch.arange(0, grid_height, cell_size) - grid_height / 2.
+        y_corners = F.pad(y_corners.view(-1, 1, 1, 1), [1, 1])
+        self.register_buffer('y_corners', y_corners)
+
+        # self.conv3d = nn.Conv2d((len(y_corners)-1) * channels, channels,1)
+        self.conv3d = nn.Linear((len(y_corners)-1) * channels, channels)
+        self.scale = scale
+    
+    def forward(self, features, calib, grid):
+        
+        # Expand the grid in the y dimension
+        corners = grid.unsqueeze(1) + self.y_corners.view(-1, 1, 1, 3)  #torch.Size([1, 8, 120, 120, 3])
+
+        # Project grid corners to image plane and normalize to [-1, 1]
+        img_corners = perspective(calib.view(-1, 1, 1, 1, 3, 4), corners) #torch.Size([1, 8, 120, 120, 2])
+
+        # Normalize to [-1, 1]
+        img_height, img_width = features.size()[2:]
+        img_size = corners.new([img_width, img_height]) / self.scale
+        norm_corners = (2 * img_corners / img_size - 1).clamp(-1, 1)  #torch.Size([1, 8, 120, 120, 2])
+
+        # Get top-left and bottom-right coordinates of voxel bounding boxes
+        bbox_corners = torch.cat([
+            torch.min(norm_corners[:, :-1, :-1, :-1],       #compare top left front and top left behind
+                      norm_corners[:, :-1, 1:, :-1]),
+            torch.max(norm_corners[:, 1:, 1:, 1:],          #compare top right front and top right behind
+                      norm_corners[:, 1:, :-1, 1:])
+        ], dim=-1)                                          #torch.Size([1, 7, 119, 119, 4])
+        
+        batch, _, depth, width, _ = bbox_corners.size()
+        bbox_corners = bbox_corners.flatten(2, 3)           #torch.Size([1, 7, 14161, 4])
+        
+
+        # Compute the area of each bounding box
+        area = ((bbox_corners[..., 2:] - bbox_corners[..., :2]).prod(dim=-1) \
+             * img_height * img_width * 0.25 + EPSILON).unsqueeze(1)        #torch.Size([1, 1, 7, 14161])
+        visible = (area > EPSILON)
+
+        # Sample integral image at bounding box locations
+        integral_img = integral_image(features)                               #torch.Size([1, 256, ..., ...])
+        top_left = F.grid_sample(integral_img, bbox_corners[..., [0, 1]])     #torch.Size([1, 256, 7, 14161])
+        btm_right = F.grid_sample(integral_img, bbox_corners[..., [2, 3]])
+        top_right = F.grid_sample(integral_img, bbox_corners[..., [2, 1]])
+        btm_left = F.grid_sample(integral_img, bbox_corners[..., [0, 3]])
+        
+        # Compute voxel features (ignore features which are not visible)
+        vox_feats = (top_left + btm_right - top_right - btm_left) / area
+        vox_feats = vox_feats * visible.float()           #torch.Size([1, 256, 7, 14161])
+
+        # vox_feats = vox_feats.view(batch, -1, depth, width)
+        vox_feats = vox_feats.permute(0, 3, 1, 2).flatten(0, 1).flatten(1, 2)       #torch.Size([14161, 1792])
+
+        # Flatten to orthographic feature map
+        ortho_feats = self.conv3d(vox_feats).view(batch, depth, width, -1)          #torch.Size([1, 119, 119, 256])
+        ortho_feats = F.relu(ortho_feats.permute(0, 3, 1, 2), inplace=True)         #torch.Size([1, 256, 119, 119])
+        # ortho_feats = F.relu(self.conv3d(vox_feats))
+
+        # Block gradients to pixels which are not visible in the image
+
+        return ortho_feats
+
+def integral_image(features):
+    return torch.cumsum(torch.cumsum(features, dim=-1), dim=-2)
+    
+
+class OftNet(nn.Module):
+
+    def __init__(self, num_classes=1, frontend='resnet18', topdown_layers=8, 
+                 grid_res=0.5, grid_height=6.):
+        
+        super().__init__()
+
+        # Construct frontend network
+        self.frontend = resnet18(pretrained=False)
+
+        # Lateral layers convert resnet outputs to a common feature size
+        self.lat8 = nn.Conv2d(128, 256, 1)
+        self.lat16 = nn.Conv2d(256, 256, 1)
+        self.lat32 = nn.Conv2d(512, 256, 1)
+        self.bn8 = nn.GroupNorm(16, 256)
+        self.bn16 = nn.GroupNorm(16, 256)
+        self.bn32 = nn.GroupNorm(16, 256)
+
+        # Orthographic feature transforms
+        self.oft8 = OFT(256, grid_res, grid_height, 1/8.)
+        self.oft16 = OFT(256, grid_res, grid_height, 1/16.)
+        self.oft32 = OFT(256, grid_res, grid_height, 1/32.)
+
+        # Topdown network
+        self.topdown = nn.Sequential(
+            *[BasicBlock(256, 256) for _ in range(topdown_layers)])
+        
+        # Detection head
+        self.head = nn.Conv2d(256, num_classes * 9, kernel_size=3, padding=1)
+
+        # ImageNet normalization
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]))
+    
+
+    def forward(self, image, calib, grid):
+        
+        # Normalize by mean and std-dev
+        image = (image - self.mean.view(3, 1, 1)) / self.std.view(3, 1, 1)
+
+        # Run frontend network
+        feats8, feats16, feats32 = self.frontend(image)
+
+        # Apply lateral layers to convert image features to common feature size
+        lat8 = F.relu(self.bn8(self.lat8(feats8))) #torch.Size([1, 256, 45, 135])
+        lat16 = F.relu(self.bn16(self.lat16(feats16))) #torch.Size([1, 256, 23, 68])
+        lat32 = F.relu(self.bn32(self.lat32(feats32))) #torch.Size([1, 256, 12, 34])
+
+        # Apply OFT and sum
+        #calib: torch.Size([1, 3, 4])
+        #grid: torch.Size([1, 120, 120, 3])
+        ortho8 = self.oft8(lat8, calib, grid)
+        ortho16 = self.oft16(lat16, calib, grid)
+        ortho32 = self.oft32(lat32, calib, grid)
+        ortho = ortho8 + ortho16 + ortho32    #torch.Size([1, 256, 119, 119])
+       
+        # Apply topdown network
+        topdown = self.topdown(ortho)         #torch.Size([1, 256, 119, 119])
+
+        # Predict encoded outputs
+        batch, _, depth, width = topdown.size()
+        outputs = self.head(topdown).view(batch, -1, 9, depth, width) #torch.Size([1, 1, 9, 119, 119])
+        scores, pos_offsets, dim_offsets, ang_offsets = torch.split(
+            outputs, [1, 3, 3, 2], dim=2)
+
+        return scores.squeeze(2), pos_offsets, dim_offsets, ang_offsets
+
+def parse_args():
+    parser = ArgumentParser()
+
+    # Data options
+    parser.add_argument('-f')
+    parser.add_argument('--root', type=str, default='/content/drive/MyDrive/3d_object_detection/KITTI',
+                        help='root directory of the KITTI dataset')
+    parser.add_argument('--grid-size', type=float, nargs=2, default=(80., 80.),
+                        help='width and depth of validation grid, in meters')
+    parser.add_argument('--train-grid-size', type=int, nargs=2, 
+                        default=(120, 120),
+                        help='width and depth of training grid, in pixels')
+    parser.add_argument('--grid-jitter', type=float, nargs=3, 
+                        default=[.25, .5, .25],
+                        help='magn. of random noise applied to grid coords')
+    parser.add_argument('--train-image-size', type=int, nargs=2, 
+                        default=(1080, 360),
+                        help='size of random image crops during training')
+    parser.add_argument('--yoffset', type=float, default=1.74,
+                        help='vertical offset of the grid from the camera axis')
+    
+    # Model options
+    parser.add_argument('--grid-height', type=float, default=4.,
+                        help='size of grid cells, in meters')
+    parser.add_argument('-r', '--grid-res', type=float, default=0.5,
+                        help='size of grid cells, in meters')
+    parser.add_argument('--frontend', type=str, default='resnet18',
+                        choices=['resnet18', 'resnet34'],
+                        help='name of frontend ResNet architecture')
+    parser.add_argument('--topdown', type=int, default=8,
+                        help='number of residual blocks in topdown network')
+    
+    # Optimization options
+    parser.add_argument('-l', '--lr', type=float, default=1e-9,
+                        help='learning rate')
+    parser.add_argument('--momentum', type=float, default=0.9,
+                        help='momentum for SGD')
+    parser.add_argument('--weight-decay', type=float, default=1e-4,
+                        help='weight decay')
+    parser.add_argument('--lr-decay', type=float, default=0.99,
+                        help='factor to decay learning rate by every epoch')
+    parser.add_argument('--loss-weights', type=float, nargs=4, 
+                        default=[1., 1., 1., 1.],
+                        help="loss weighting factors for score, position,"\
+                            " dimension and angle loss respectively")
+
+
+    # Training options
+    parser.add_argument('-e', '--epochs', type=int, default=600,
+                        help='number of epochs to train for')
+    parser.add_argument('-b', '--batch-size', type=int, default=1,
+                        help='mini-batch size for training')
+    
+    # Experiment options
+    parser.add_argument('--name', type=str, default='test',
+                        help='name of experiment')
+    parser.add_argument('-s', '--savedir', type=str, 
+                        default='experiments',
+                        help='directory to save experiments to')
+    parser.add_argument('-g', '--gpu', type=int, nargs='*', default=[0],
+                        help='ids of gpus to train on. Leave empty to use cpu')
+    parser.add_argument('-w', '--workers', type=int, default=4,
+                        help='number of worker threads to use for data loading')
+    parser.add_argument('--val-interval', type=int, default=5,
+                        help='number of epochs between validation runs')
+    parser.add_argument('--print-iter', type=int, default=10,
+                        help='print loss summary every N iterations')
+    parser.add_argument('--vis-iter', type=int, default=50,
+                        help='display visualizations every N iterations')
+    return parser.parse_args()
+
+def _make_experiment(args):
+
+    print('\n' + '#' * 80)
+    print(datetime.now().strftime('%A %-d %B %Y %H:%M'))
+    print('Creating experiment \'{}\' in directory:\n  {}'.format(
+        args.name, args.savedir))
+    print('#' * 80)
+    print('\nConfig:')
+    for key in sorted(args.__dict__):
+        print('  {:12s} {}'.format(key + ':', args.__dict__[key]))
+    print('#' * 80)
+    
+    # Create a new directory for the experiment
+    savedir = os.path.join(args.savedir, args.name)
+    os.makedirs(savedir, exist_ok=True)
+
+    # Create tensorboard summary writer
+    summary = SummaryWriter(savedir)
+
+    # Save configuration to file
+    with open(os.path.join(savedir, 'config.yml'), 'w') as fp:
+        yaml.safe_dump(args.__dict__, fp)
+    
+    # Write config as a text summary
+    summary.add_text('config', '\n'.join(
+        '{:12s} {}'.format(k, v) for k, v in sorted(args.__dict__.items())))
+    summary.file_writer.flush()
+
+    return summary
+
+def save_checkpoint(args, epoch, model, optimizer, scheduler):
+
+    model = model.module if isinstance(model, nn.DataParallel) else model
+    ckpt = {
+        'epoch' : epoch,
+        'model' : model.state_dict(),
+        'optim' : optimizer.state_dict(),
+        'scheduler' : scheduler.state_dict(),
+    }
+    ckpt_file = os.path.join(
+        args.savedir, args.name, 'checkpoint-{:04d}.pth.gz'.format(epoch))
+    print('==> Saving checkpoint \'{}\''.format(ckpt_file))
+    torch.save(ckpt, ckpt_file)
+    
+
+def draw_bbox3d(obj, calib, ax, color='b'):
+
+    # Get corners of 3D bounding box
+    corners = bbox_corners(obj)
+
+    # Project into image coordinates
+    img_corners = perspective(calib.cpu(), corners).numpy()
+    
+    # Draw polygons
+    # Front face
+    ax.add_patch(Polygon(img_corners[[1, 3, 7, 5]], ec=color, fill=False))
+    # Back face
+    ax.add_patch(Polygon(img_corners[[0, 2, 6, 4]], ec=color, fill=False))
+    ax.add_line(Line2D(*img_corners[[0, 1]].T, c=color))        # Lower left
+    ax.add_line(Line2D(*img_corners[[2, 3]].T, c=color))        # Lower right
+    ax.add_line(Line2D(*img_corners[[4, 5]].T, c=color))        # Upper left
+    ax.add_line(Line2D(*img_corners[[6, 7]].T, c=color))        # Upper right
+
+
+def visualize_objects(image, calib, objects, cmap='tab20', ax=None):
+    
+    # Create a figure if it doesn't already exist
+    if ax is None:
+        fig, ax = plt.subplots(figsize = (20, 5))
+        
+    ax.clear()
+
+    # Visualize image
+    
+    ax.imshow(image.permute(1, 2, 0).cpu().numpy())
+    extents = ax.axis()
+
+    # Visualize objects
+    cmap = cm.get_cmap(cmap, len(objects))
+    for i, obj in enumerate(objects):
+        draw_bbox3d(obj, calib, ax, cmap(i))
+    
+    # Format axis
+    ax.axis(extents)
+    ax.axis(False)
+    ax.grid(False) 
+    return ax
+
+class ObjectEncoder(object):
+
+    def __init__(self, classnames=['Car'], pos_std=[.5, .36, .5], 
+                 log_dim_mean=[[0.42, 0.48, 1.35]], 
+                 log_dim_std=[[.085, .067, .115]], sigma=1., nms_thresh=0.05):
+        
+        self.classnames = classnames
+        self.nclass = len(classnames)
+        self.pos_std = torch.tensor(pos_std)
+        self.log_dim_mean = torch.tensor(log_dim_mean)
+        self.log_dim_std = torch.tensor(log_dim_std)
+
+        self.sigma = sigma
+        self.nms_thresh = nms_thresh
+        
+    
+    def encode_batch(self, objects, grids):
+        '''
+        Encode data in each batch base on objects and grid
+        Args:
+          objects: tuple of all object in image
+          grids: ground grid in one batch with y = 1.74 torch.Size([1, 120, 120, 3])
+        Return:
+          heatmaps: torch.Size([1, 1, 119, 119])
+          pos_offsets: torch.Size([1, 1, 3, 119, 119])
+          dim_offsets: torch.Size([1, 1, 3, 119, 119])
+          ang_offsets: torch.Size([1, 1, 2, 119, 119])
+          mask: torch.Size([1, 1, 119, 119])        
+        '''
+
+        # Encode batch element by element
+        batch_encoded = [self.encode(objs, grid) for objs, grid 
+                         in zip(objects, grids)]
+        
+        # Transpose batch
+        return [torch.stack(t) for t in zip(*batch_encoded)]
+
+
+    def encode(self, objects, grid):
+        '''
+        Encode data base on objects and grid
+        Args:
+          objects: tuple of all object in image
+          grid: ground grid with y = 1.74 torch.Size([120, 120, 3])
+        Return:
+          heatmaps: torch.Size(1, 119, 119])
+          pos_offsets: torch.Size([1, 3, 119, 119])
+          dim_offsets: torch.Size([1, 3, 119, 119])
+          ang_offsets: torch.Size([1, 2, 119, 119])
+          mask: torch.Size([1, 1, 119, 119])        
+        '''
+        # Filter objects by class name
+        objects = [obj for obj in objects if obj.classname in self.classnames]
+
+
+        # Skip empty examples
+        if len(objects) == 0:
+            return self._encode_empty(grid)
+        
+        # Construct tensor representation of objects
+        classids = torch.tensor([self.classnames.index(obj.classname) 
+                                for obj in objects], device=grid.device)
+        positions = grid.new([obj.position for obj in objects])
+        dimensions = grid.new([obj.dimensions for obj in objects])
+        angles = grid.new([obj.angle for obj in objects])
+
+        # Assign objects to locations on the grid
+        mask, indices = self._assign_to_grid(
+            classids, positions, dimensions, angles, grid)
+
+        # Encode object heatmaps
+        heatmaps = self._encode_heatmaps(classids, positions, grid)
+        
+        # Encode positions, dimensions and angles
+        pos_offsets = self._encode_positions(positions, indices, grid)
+        dim_offsets = self._encode_dimensions(classids, dimensions, indices)
+        ang_offsets = self._encode_angles(angles, indices)
+
+        return heatmaps, pos_offsets, dim_offsets, ang_offsets, mask   
+    
+
+    def _assign_to_grid(self, classids, positions, dimensions, angles, grid):
+        
+        '''
+        Return positive locations and the id of the corresponding instance (True/False) and (1/0)
+        Args:
+          classids : torch.Size([number of car]) with each elements = 0
+          positions: 3D object location in camera coordinates [-pi..pi] torch.Size([number of car, 3])
+          dimensions: 3D object dimensions: height, width, length (in meters) torch.Size([number of car, 3])
+          angles: Observation angle of object raning [-pi..pi] with torch.Size([number of car])
+          grid: ground grid with y = 1.74 torch.Size([120, 120, 3])
+        Return:
+          labels: mask with element = True if grid cells which lie within each object torch.Size([1, 119, 119])
+          indices mask with element = 1 if grid cells which lie within each object torch.Size([1, 119, 119])
+        '''
+
+        # Compute grid centers
+        centers = (grid[1:, 1:, :] + grid[:-1, :-1, :]) / 2.
+
+        # Transform grid into object coordinate systems
+        local_grid = rotate(centers - positions.view(-1, 1, 1, 3), 
+            -angles.view(-1, 1, 1)) / dimensions.view(-1, 1, 1, 3)
+        
+        # Find all grid cells which lie within each object
+        inside = (local_grid[..., [0, 2]].abs() <= 0.5).all(dim=-1)
+        
+        # Expand the mask in the class dimension NxDxW * NxC => NxCxDxW
+        class_mask = classids.view(-1, 1) == torch.arange(
+            len(self.classnames)).type_as(classids)
+        class_inside = inside.unsqueeze(1) & class_mask[:, :, None, None]
+
+        # Return positive locations and the id of the corresponding instance 
+        labels, indices = torch.max(class_inside, dim=0)
+        return labels, indices
+    
+
+    def _encode_heatmaps(self, classids, positions, grid):
+        '''
+        Return the confidence map S(x, z)  which indicates the probability that there exists an object with a bounding box centred on location (x, y0, z).
+        Args:
+          classids : torch.Size([number of car]) with each elements = 0
+          positions: 3D objects location in camera coordinates (in meters) with shape torch.Size([number of car, 3]) 
+          grid: ground grid with y = 1.74 torch.Size([120, 120, 3])
+        Return:
+          heatmaps with shape torch.Size([1, 119, 119])
+        '''
+        centers = (grid[1:, 1:, [0, 2]] + grid[:-1, :-1, [0, 2]]) / 2.
+        positions = positions.view(-1, 1, 1, 3)[..., [0, 2]]
+
+        # Compute per-object heatmaps
+        sqr_dists = (positions - centers).pow(2).sum(dim=-1) 
+        obj_heatmaps = torch.exp(-0.5 * sqr_dists / self.sigma ** 2)
+
+        heatmaps = obj_heatmaps.new_zeros(self.nclass, *obj_heatmaps.size()[1:])
+        for i in range(self.nclass):
+            mask = classids == i
+            if mask.any():
+                heatmaps[i] = torch.max(obj_heatmaps[mask], dim=0)[0]
+        return heatmaps
+
+    def _encode_positions(self, positions, indices, grid):
+        '''   
+        Predicts the relative offset ∆pos from grid cell locations on the ground plane (x, y0, z) to the center of
+            the corresponding ground truth object pi
+        Args:
+          positions: 3D objects location in camera coordinates (in meters) with shape torch.Size([number of car, 3]) 
+          indices mask with element = 1 if grid cells which lie within each object torch.Size([1, 119, 119])
+          grid: ground grid with y = 1.74 torch.Size([120, 120, 3])
+        Return:
+          pos_offsets: torch.Size([1, 3, 119, 119])
+        '''
+        # Compute the center of each grid cell
+        centers = (grid[1:, 1:] + grid[:-1, :-1]) / 2.
+
+        # Encode positions into the grid
+        C, D, W = indices.size()
+        positions = positions.index_select(0, indices.view(-1)).view(C, D, W, 3)
+
+        # Compute relative offsets and normalize
+        pos_offsets = (positions - centers) / self.pos_std.to(positions)
+        return pos_offsets.permute(0, 3, 1, 2)
+    
+    def _encode_dimensions(self, classids, dimensions, indices):
+        ''' 
+        Predicts the logarithmic scale offset ∆dim between the assigned ground truth object i 
+          with dimensions di and the mean dimensions over all objects of the given class
+        Args:
+          classids : torch.Size([number of car]) with each elements = 0 
+          dimensions: 3D object dimensions: height, width, length (in meters) of object torch.Size([number of car, 3])
+          indices mask with element = 1 if grid cells which lie within each object torch.Size([1, 119, 119])
+        Return:
+          pos_offsets: torch.Size([1, 3, 119, 119])
+        '''
+        # Convert mean and std to tensors
+        log_dim_mean = self.log_dim_mean.to(dimensions)[classids]
+        log_dim_std = self.log_dim_std.to(dimensions)[classids]
+
+        # Compute normalized log scale offset
+        dim_offsets = (torch.log(dimensions) - log_dim_mean) / log_dim_std
+
+        # Encode dimensions to grid
+        C, D, W = indices.size()
+        dim_offsets = dim_offsets.index_select(0, indices.view(-1))
+        return dim_offsets.view(C, D, W, 3).permute(0, 3, 1, 2)
+    
+
+    def _encode_angles(self, angles, indices):
+        '''
+        Predicts the sine and cosine of the objects orientation θi about the y-axis.
+        Args:
+          angles: Observation angle of object raning [-pi..pi] with torch.Size([number of car])
+          indices mask with element = 1 if grid cells which lie within each object torch.Size([1, 119, 119])
+        Return:
+          objects orientation: torch.Size([1, 2, 119, 119])
+        '''
+
+        # Compute rotation vector
+        sin = torch.sin(angles)[indices]
+        cos = torch.cos(angles)[indices]
+        return torch.stack([cos, sin], dim=1)
+    
+
+    def _encode_empty(self, grid):
+        depth, width, _ = grid.size()
+        '''        
+        If there is no object in image, return empty tensors
+        Args:
+          grid: ground grid with y = 1.74 torch.Size([120, 120, 3])
+        Return:
+          heatmaps: torch.Size([1, 119, 119])
+          pos_offsets: torch.Size([1, 3, 119, 119])
+          dim_offsets: torch.Size([1, 3, 119, 119])
+          ang_offsets: torch.Size([1, 2, 119, 119])
+          mask: torch.Size([1, 119, 119])
+        '''
+        # Generate empty tensors
+        heatmaps = grid.new_zeros((self.nclass, depth-1, width-1))
+        pos_offsets = grid.new_zeros((self.nclass, 3, depth-1, width-1))
+        dim_offsets = grid.new_zeros((self.nclass, 3, depth-1, width-1))
+        ang_offsets = grid.new_zeros((self.nclass, 2, depth-1, width-1))
+        mask = grid.new_zeros((self.nclass, depth-1, width-1)).bool()
+        return heatmaps, pos_offsets, dim_offsets, ang_offsets, mask
+    
+
+    def decode(self, heatmaps, pos_offsets, dim_offsets, ang_offsets, grid):
+        
+        # Apply NMS to find positive heatmap locations
+        peaks, scores, classids = self._decode_heatmaps(heatmaps)
+
+        # Decode positions, dimensions and rotations
+        positions = self._decode_positions(pos_offsets, peaks, grid)
+        dimensions = self._decode_dimensions(dim_offsets, peaks)
+        angles = self._decode_angles(ang_offsets, peaks)
+
+        objects = list()
+        for score, cid, pos, dim, ang in zip(scores, classids, positions, 
+                                             dimensions, angles):
+            objects.append(ObjectData(
+                self.classnames[cid], pos, dim, ang, score))
+        
+        return objects
+    
+
+    def decode_batch(self, heatmaps, pos_offsets, dim_offsets, ang_offsets, 
+                     grids):
+        
+        boxes = list()
+        for hmap, pos_off, dim_off, ang_off, grid in zip(heatmaps, pos_offsets, 
+                                                         dim_offsets, 
+                                                         ang_offsets, grids):
+            boxes.append(self.decode(hmap, pos_off, dim_off, ang_off, grid))
+        
+        return boxes
+
+    def _decode_heatmaps(self, heatmaps):
+        peaks = non_maximum_suppression(heatmaps, self.sigma)
+        scores = heatmaps[peaks]
+        classids = torch.nonzero(peaks)[:, 0]
+        return peaks, scores.cpu(), classids.cpu()
+
+
+    def _decode_positions(self, pos_offsets, peaks, grid):
+
+        # Compute the center of each grid cell
+        centers = (grid[1:, 1:] + grid[:-1, :-1]) / 2.
+
+        # Un-normalize grid offsets
+        positions = pos_offsets.permute(0, 2, 3, 1) * self.pos_std.to(grid) \
+            + centers
+        return positions[peaks].cpu()
+    
+    def _decode_dimensions(self, dim_offsets, peaks):
+        dim_offsets = dim_offsets.permute(0, 2, 3, 1)
+        dimensions = torch.exp(
+            dim_offsets * self.log_dim_std.to(dim_offsets) \
+                + self.log_dim_mean.to(dim_offsets))
+        return dimensions[peaks].cpu()
+    
+    def _decode_angles(self, angle_offsets, peaks):
+        cos, sin = torch.unbind(angle_offsets, 1)
+        return torch.atan2(sin, cos)[peaks].cpu()
+
+
+
+def non_maximum_suppression(heatmaps, sigma=1.0, thresh=0.05, max_peaks=50):
+    '''
+    The peaks tensor is a boolean mask that is True for pixels that are both a maximum and above the threshold.
+    Args: 
+      heatmaps: torch.Size([1, 119, 119])
+      sigma: the standard deviation of the Gaussian kernel used for smoothing 
+      thresh: the threshold for peak detection 
+      max_peaks: the maximum number of peaks to keep.
+    Return: 
+      peaks: the boolean mask of peak locations. torch.Size([1, 119, 119])
+    '''
+    # Smooth with a Gaussian kernel
+    num_class = heatmaps.size(0)
+    kernel = gaussian_kernel(sigma).to(heatmaps)
+    kernel = kernel.expand(num_class, num_class, -1, -1)
+    smoothed = F.conv2d(
+        heatmaps[None], kernel, padding=int((kernel.size(2)-1)/2))
+
+    # Max pool over the heatmaps
+    max_inds = F.max_pool2d(smoothed, 3, stride=1, padding=1, 
+                               return_indices=True)[1].squeeze(0)
+
+    # Find the pixels which correspond to the maximum indices
+    _, height, width = heatmaps.size()
+    flat_inds = torch.arange(height*width).type_as(max_inds).view(height, width)
+    peaks = (flat_inds == max_inds) & (heatmaps > thresh)
+    
+    # Keep only the top N peaks
+    if peaks.long().sum() > max_peaks:
+        scores = heatmaps[peaks]
+        scores, _ = torch.sort(scores, descending=True)
+        peaks = peaks & (heatmaps > scores[max_peaks-1])
+    return peaks
+
+def heatmap_loss(heatmap, gt_heatmap, weights=[100], thresh=0.05):
+    '''
+    scale loss which has object by 100 to overcome negative component of the loss dominating optimization and compute MAE loss
+    Args:
+      heatmap : prediction heatmap torch.Size([1, 1, 119, 119])
+      gt_heatmap: ground true heatmap torch.Size([1, 1, 119, 119])
+    Return: sum of MAE loss (scalar)
+    '''
+    positives = (gt_heatmap > thresh).float()
+    weights = heatmap.new(weights).view(1, -1, 1, 1)
+
+    loss = F.l1_loss(heatmap, gt_heatmap, reduce=False)
+    
+    loss *= positives * weights + (1 - positives)
+    return loss.sum()
+
+def masked_l1_loss(input, target, mask):
+    '''
+    compute MAE loss grid that intersect with bounding box object
+    Args:
+      input: input tensor
+      target: target tensor
+      mask: torch.Size([1, 1, 119, 119])
+    Return:
+      sum of MAE loss (scalar)
+    '''
+    return (F.l1_loss(input, target, reduction='none') * mask.float()).sum()
+    
+def compute_loss(pred_encoded, gt_encoded, loss_weights=[1., 1., 1., 1.]):
+
+    # Expand tuples
+    score, pos_offsets, dim_offsets, ang_offsets = pred_encoded
+    heatmaps, gt_pos_offsets, gt_dim_offsets, gt_ang_offsets, mask = gt_encoded
+    score_weight, pos_weight, dim_weight, ang_weight = loss_weights
+
+    # Compute losses
+    score_loss = heatmap_loss(score, heatmaps)
+    pos_loss = masked_l1_loss(pos_offsets, gt_pos_offsets, mask.unsqueeze(2))
+    dim_loss = masked_l1_loss(dim_offsets, gt_dim_offsets, mask.unsqueeze(2))
+    ang_loss = masked_l1_loss(ang_offsets, gt_ang_offsets, mask.unsqueeze(2))
+
+    # Combine loss
+    total_loss = score_loss * score_weight + pos_loss * pos_weight \
+            + dim_loss * dim_weight + ang_loss * ang_weight
+    
+    # Store scalar losses in a dictionary
+    loss_dict = {
+        'score' : float(score_loss), 'position' : float(pos_loss),
+        'dimension' : float(dim_loss), 'angle' : float(ang_loss),
+        'total' : float(total_loss) 
+    }
+
+    return total_loss, loss_dict
+    
+    
+def vis_score(score, grid, cmap='cividis', ax=None):
+    score = score.cpu().float().detach().numpy()
+    grid = grid.cpu().detach().numpy()
+
+    # Create a new axis if one is not provided
+    if ax is None:
+        fig = plt.figure()
+        ax = fig.gca()
+    
+    # Plot scores
+    ax.clear()
+    ax.pcolormesh(grid[..., 0], grid[..., 2], score, cmap=cmap, vmin=0, vmax=1)
+    ax.set_aspect('equal')
+
+    # Format axes
+    ax.set_xlabel('x (m)')
+    ax.set_ylabel('z (m)')
+
+    return ax
+
+def visualize_image(image):
+    return image[0].cpu().detach()
+
+def visualize_score(scores, heatmaps, grid):
+
+    # Visualize score
+    fig_score = plt.figure(num='score', figsize=(8, 6))
+    fig_score.clear()
+
+    vis_score(scores[0, 0], grid[0], ax=plt.subplot(121))
+    vis_score(heatmaps[0, 0], grid[0], ax=plt.subplot(122))
+
+    return fig_score
+
+def visualise_bboxes(image, calib, objects, preds):
+
+    fig = plt.figure(num='bbox', figsize=(8, 6))
+    fig.clear()
+    ax1 = plt.subplot(211)
+    ax2 = plt.subplot(212)
+
+    visualize_objects(image[0], calib[0], preds[0], ax=ax1)
+    ax1.set_title('Predictions')
+
+    visualize_objects(image[0], calib[0], objects[0], ax=ax2)
+    ax2.set_title('Ground truth')
+
+    return fig
+    
+def train(args, dataloader, model, encoder, optimizer, summary, epoch):
+    
+    print('\n==> Training on {} minibatches'.format(len(dataloader)))
+    model.train()
+    epoch_loss = MetricDict()
+
+    t = time.time()
+    
+    for i, (_, image, calib, objects, grid) in enumerate(dataloader):
+        
+        # Move tensors to GPU
+        if len(args.gpu) > 0:
+            image, calib, grid = image.cuda(), calib.cuda(), grid.cuda()
+
+        # Run network forwards
+        pred_encoded = model(image, calib, grid)
+
+        # Encode ground truth objects
+        gt_encoded = encoder.encode_batch(objects, grid)
+
+        # Compute losses
+        loss, loss_dict = compute_loss(
+            pred_encoded, gt_encoded, args.loss_weights)
+        if float(loss) != float(loss):
+            raise RuntimeError('Loss diverged :(')      
+        epoch_loss += loss_dict
+
+        # Optimize
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        # Print summary
+        if i % args.print_iter == 0 and i != 0:
+            batch_time = (time.time() - t) / (1 if i == 0 else args.print_iter)
+            eta = ((args.epochs - epoch + 1) * len(dataloader) - i) * batch_time
+
+            s = '[{:4d}/{:4d}] batch_time: {:.2f}s eta: {:s} loss: '.format(
+                i, len(dataloader), batch_time, 
+                str(timedelta(seconds=int(eta))))
+            for k, v in loss_dict.items():
+                s += '{}: {:.2e} '.format(k, v)
+            print(s)
+            t = time.time()
+        
+        # Visualize predictions
+        if i % args.vis_iter == 0:
+
+            # Visualize image
+            summary.add_image('train/image', visualize_image(image), epoch)
+
+            # Visualize scores
+            summary.add_figure('train/score', 
+                visualize_score(pred_encoded[0], gt_encoded[0], grid), epoch)
+            
+            # Decode predictions
+            preds = encoder.decode_batch(*pred_encoded, grid)
+
+            # Visualise bounding boxes
+            summary.add_figure('train/bboxes',
+                visualise_bboxes(image, calib, objects, preds), epoch)
+        
+        # TODO decode and save results        
+
+    # Print epoch summary and save results
+    print('==> Training epoch complete')
+    for key, value in epoch_loss.mean.items():
+        print('{:8s}: {:.4e}'.format(key, value))
+        summary.add_scalar('train/loss/{}'.format(key), value, epoch)
+        
+def validate(args, dataloader, model, encoder, summary, epoch):
+    
+    print('\n==> Validating on {} minibatches\n'.format(len(dataloader)))
+    model.eval()
+    epoch_loss = MetricDict()
+
+    for i, (_, image, calib, objects, grid) in enumerate(dataloader):
+
+        # Move tensors to GPU
+        if len(args.gpu) > 0:
+            image, calib, grid = image.cuda(), calib.cuda(), grid.cuda()
+
+        with torch.no_grad():
+
+            # Run network forwards
+            pred_encoded = model(image, calib, grid)
+
+            # Encode ground truth objects
+            gt_encoded = encoder.encode_batch(objects, grid)
+
+            # Compute losses
+            _, loss_dict = compute_loss(
+                pred_encoded, gt_encoded, args.loss_weights)       
+            epoch_loss += loss_dict
+        
+            # Decode predictions
+            preds = encoder.decode_batch(*pred_encoded, grid)
+        
+        # Visualize predictions
+        if i % args.vis_iter == 0:
+
+            # Visualize image
+            summary.add_image('val/image', visualize_image(image), epoch)
+
+            # Visualize scores
+            summary.add_figure('val/score', 
+                visualize_score(pred_encoded[0], gt_encoded[0], grid), epoch)
+            
+            # Visualise bounding boxes
+            summary.add_figure('val/bboxes',
+                visualise_bboxes(image, calib, objects, preds), epoch)
+                
+    # TODO evaluate
+    
+    print('\n==> Validation epoch complete')
+    for key, value in epoch_loss.mean.items():
+        print('{:8s}: {:.4e}'.format(key, value))
+        summary.add_scalar('val/loss/{}'.format(key), value, epoch)
+
+# Parse command line arguments
+args = parse_args()
+# Create experiment
+summary = _make_experiment(args)
+
+# Create datasets
+train_data = KittiObjectDataset(args.root, 'train', args.grid_size, args.grid_res, args.yoffset)
+val_data = KittiObjectDataset(args.root, 'val', args.grid_size, args.grid_res, args.yoffset)
+
+# Apply data augmentation
+train_data = AugmentedObjectDataset(
+    train_data, args.train_image_size, args.train_grid_size, 
+    jitter=args.grid_jitter)
+
+# Create dataloaders
+train_loader = DataLoader(train_data, args.batch_size, shuffle=True, 
+    num_workers=args.workers, collate_fn=collate)
+val_loader = DataLoader(val_data, args.batch_size, shuffle=False, 
+    num_workers=args.workers,collate_fn=collate)
+
+# Build model
+model = OftNet(num_classes=1, frontend=args.frontend, 
+                topdown_layers=args.topdown, grid_res=args.grid_res, 
+                grid_height=args.grid_height)
+
+if len(args.gpu) > 0:
+    torch.cuda.set_device(args.gpu[0])
+    model = nn.DataParallel(model, args.gpu).cuda()
+
+# Create encoder
+encoder = ObjectEncoder()
+
+# Setup optimizer
+optimizer = optim.SGD(model.parameters(), args.lr, args.momentum, args.weight_decay)
+scheduler = optim.lr_scheduler.ExponentialLR(optimizer, args.lr_decay)
+
+for epoch in range(1, args.epochs+1):
+    if epoch ==4: break
+    print('\n=== Beginning epoch {} of {} ==='.format(epoch, args.epochs))
+        
+    # Update and log learning rate
+    scheduler.step(epoch-1)
+    summary.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch)
+
+    # Train model
+    train(args, train_loader, model, encoder, optimizer, summary, epoch)
+
+    # Run validation every N epochs
+    if epoch % args.val_interval == 0:
+
+            
+        validate(args, val_loader, model, encoder, summary, epoch)
+
+        # Save model checkpoint
+        save_checkpoint(args, epoch, model, optimizer, scheduler)
