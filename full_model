@@ -14,10 +14,8 @@ import torch.nn as nn
 import torch.utils.model_zoo as model_zoo
 import torch.nn.functional as F
 import os
-import time
 import yaml
 import math
-import numpy as np
 import matplotlib
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 import matplotlib.pyplot as plt
@@ -25,19 +23,15 @@ from matplotlib.ticker import FuncFormatter
 from datetime import datetime, timedelta
 from argparse import ArgumentParser
 from collections import defaultdict
-import torch.nn as nn
 from torch import optim
 from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
 from argparse import ArgumentParser
-import math
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, Circle, Polygon
 from matplotlib.lines import Line2D
 from matplotlib import cm
 from matplotlib import transforms
-
-
 
 ObjectData = namedtuple('ObjectData', 
     ['classname', 'position', 'dimensions', 'angle', 'score'])
