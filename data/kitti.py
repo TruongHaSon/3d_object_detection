@@ -3,11 +3,11 @@ import torch
 import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
-from data.utils import make_grid
+from utils import make_grid
 from collections import namedtuple
 
 ObjectData = namedtuple('ObjectData', 
-    ['classname', 'position', 'dimensions', 'angle', 'score'])
+    ['classname','truncated', 'occlusion', 'position', 'dimensions', 'angle', 'score'])
 
 KITTI_CLASS_NAMES = ['Car', 'Van', 'Truck', 'Pedestrian', 'Person_sitting',
                      'Cyclist', 'Tram', 'Misc', 'DontCare']
@@ -33,11 +33,9 @@ class KittiObjectDataset(Dataset):
         # Read split indices from file
         split_file = kitti_root + '/splits/{}.txt'.format(split)
         self.indices = read_split(split_file)
-
-        # Make grid
-        self.grid = make_grid(grid_size, 
-                                    (-grid_size[0]/2., y_offset, 0.), 
-                                    grid_res)
+        self.grid_size = grid_size
+        self.y_offset = y_offset
+        self.grid_res = grid_res
         
     def __len__(self):
         return len(self.indices)
@@ -50,7 +48,7 @@ class KittiObjectDataset(Dataset):
         Returns:
             idx (int): idx of an image in data
             image: PIL image
-            calib: calib matrix with the shape (3, 4)
+            calib (torch.tensor): calib matrix with the shape (3, 4)
             objects (list): list of labels
             grid: 3D grid.
         """
@@ -67,7 +65,12 @@ class KittiObjectDataset(Dataset):
         label_file = os.path.join(self.root, 'label_2/{:06d}.txt'.format(idx))
         objects = read_kitti_objects(label_file)
 
-        return idx, image, calib, objects, self.grid
+        # Make grid
+        grid = make_grid(self.grid_size, 
+                        (-self.grid_size[0]/2., self.y_offset, 0.), 
+                        self.grid_res)
+
+        return idx, image, calib, objects, grid
 
 
 def read_split(filename):
@@ -107,7 +110,7 @@ def read_kitti_objects(filename):
         filename (str): name of file.
     Returns:
         list of objects with each of object class 
-            [classname, dimensions, position, angle, score]
+            ['classname','truncated', 'occlusion', 'position', 'dimensions', 'angle', 'score']
     """
     objects = list()
     with open(filename, 'r') as fp:
@@ -115,14 +118,14 @@ def read_kitti_objects(filename):
         # Each line represents a single object
         for line in fp:
             objdata = line.split(' ')
-            if not (14 <= len(objdata) <= 15):
+            if not (14 <= len(objdata) <= 15): 
                 raise IOError('Invalid KITTI object file {}'.format(filename))
-
             # Parse object data
             objects.append(ObjectData(
                 classname=objdata[0],
-                dimensions=[
-                    float(objdata[10]), float(objdata[8]), float(objdata[9])],
+                truncated = float(objdata[1]),
+                occlusion = float(objdata[2]),
+                dimensions=[float(objdata[10]), float(objdata[8]), float(objdata[9])],
                 position=[float(p) for p in objdata[11:14]],
                 angle=float(objdata[14]),
                 score=float(objdata[15]) if len(objdata) == 16 else 1.
