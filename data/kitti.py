@@ -121,13 +121,14 @@ def read_kitti_objects(filename):
             if not (14 <= len(objdata) <= 15): 
                 raise IOError('Invalid KITTI object file {}'.format(filename))
             # Parse object data
-            objects.append(ObjectData(
-                classname=objdata[0],
-                truncated = float(objdata[1]),
-                occlusion = float(objdata[2]),
-                dimensions=[float(objdata[10]), float(objdata[8]), float(objdata[9])],
-                position=[float(p) for p in objdata[11:14]],
-                angle=float(objdata[14]),
-                score=float(objdata[15]) if len(objdata) == 16 else 1.
-            ))
+                #truncated = float(objdata[1])
+                #occlusion = float(objdata[2])
+            if objdata[0] in ['Car', 'Van', 'Truck', 'Pedestrian','Cyclist']:
+                objects.append(ObjectData(
+                    classname=objdata[0],
+                    dimensions=[float(objdata[10]), float(objdata[8]), float(objdata[9])],
+                    position=[float(p) for p in objdata[11:14]],
+                    angle=float(objdata[14]),
+                    score=float(objdata[15]) if len(objdata) == 16 else 1.
+                ))
     return objects
