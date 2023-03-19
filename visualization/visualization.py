@@ -48,17 +48,17 @@ def draw_projected_box3d(image, corners3d, color, thickness=2):
 
 def choose_color(name):
     if name == 'Car':
-        color = (0, 0, 255)  # Màu xanh dương
+        color = (0, 0, 255)  # blue
     elif name == 'Van':
-        color = (255, 165, 0)  # Màu cam
+        color = (255, 165, 0)  # orange
     elif name == 'Truck':
-        color = (255, 255, 0)  # Màu vàng
+        color = (255, 255, 0)  # yellow
     elif name == 'Pedestrian':
-        color = (128, 0, 128)  # Màu tím
+        color = (128, 0, 128)  # purple
     elif name == 'Cyclist':
-        color = (0, 255, 0)  # Màu xanh lá
+        color = (0, 255, 0)  # green
     else:
-        color = (255, 0, 0)  # Màu đỏ
+        color = (255, 0, 0)  # red
     return color
 
 def draw_3d_boxes(img, objects, calib):
@@ -112,17 +112,17 @@ def vis_score(image, calib, objects, grid, cmap='binary', ax=None):
     # Plot true objects
     for i, obj in enumerate(objects):
         if obj.classname == 'Car':
-            color = 'tab:blue'  # Màu xanh dương
+            color = 'tab:blue'  
         elif obj.classname == 'Van':
-            color = 'tab:orange'  # Màu cam
+            color = 'tab:orange'  
         elif obj.classname == 'Truck':
-            color = 'tab:olive'  # Màu xanh lá cây nhạt
+            color = 'tab:olive'  
         elif obj.classname == 'Pedestrian':
-            color = 'tab:purple'  # Màu tím
+            color = 'tab:purple'  
         elif obj.classname == 'Cyclist':
-            color = 'tab:green'  # Màu xanh lá cây đậm
+            color = 'tab:green'  
         else:
-            color = 'tab:red'  # Màu đỏ
+            color = 'tab:red'  
 
         # Get corners of 3D bounding box
         corners = bbox_corners(obj)
