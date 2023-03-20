@@ -14,7 +14,6 @@ KITTI_CLASS_NAMES = ['Car', 'Van', 'Truck', 'Pedestrian', 'Person_sitting',
 
 class KittiObjectDataset(Dataset):
     """KITTI Object dataset.
-
     Args:
         kitti_root (str): root of the data. 
         split (str): train or test set.
@@ -42,7 +41,6 @@ class KittiObjectDataset(Dataset):
     
     def __getitem__(self, index):
         """Get item from dataset.
-
         Args:
             index (int): idx of an image in split file.
         Returns:
@@ -75,7 +73,6 @@ class KittiObjectDataset(Dataset):
 
 def read_split(filename):
     """Read a list of indices.
-
     Args:
         filename (str): name of file.
     Returns:
@@ -121,14 +118,13 @@ def read_kitti_objects(filename):
             if not (14 <= len(objdata) <= 15): 
                 raise IOError('Invalid KITTI object file {}'.format(filename))
             # Parse object data
-                #truncated = float(objdata[1])
-                #occlusion = float(objdata[2])
-            if objdata[0] in ['Car', 'Van', 'Truck', 'Pedestrian','Cyclist']:
-                objects.append(ObjectData(
-                    classname=objdata[0],
-                    dimensions=[float(objdata[10]), float(objdata[8]), float(objdata[9])],
-                    position=[float(p) for p in objdata[11:14]],
-                    angle=float(objdata[14]),
-                    score=float(objdata[15]) if len(objdata) == 16 else 1.
-                ))
+            objects.append(ObjectData(
+                classname=objdata[0],
+                truncated = float(objdata[1]),
+                occlusion = float(objdata[2]),
+                dimensions=[float(objdata[10]), float(objdata[8]), float(objdata[9])],
+                position=[float(p) for p in objdata[11:14]],
+                angle=float(objdata[14]),
+                score=float(objdata[15]) if len(objdata) == 16 else 1.
+            ))
     return objects
